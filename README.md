@@ -10,6 +10,34 @@ is the useful part, because most guides send you down those paths.
 
 ---
 
+## Bidirectional diagnostic (run this first)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/check.sh | bash
+```
+
+It tells you **which side is broken** — the Mac, or the peer — and what to do about it.
+
+```
+[1] Mac / Bluetooth     OK   State=On  48:E2:44:E1:F1:7A  v8718 c5747
+    NVRAM               OK   bluetoothExternalDongleFailed=%00
+[2] Mac / publishing    OK   _airdrop._tcp published (instance 0c571d750a9a)
+                        OK   AWDL datapath established at some point
+[3] Peer                WARN discovery record aged out (Aging out)
+                        FAIL send failure Code=7 / NWError -65553
+[4] Verdict             Problem is on the PEER side; the Mac is healthy
+```
+
+> **The two directions are not symmetric.**
+> iPhone → Mac only needs the Mac to publish its service (automatic).
+> Mac → iPhone needs the **iPhone to keep advertising** (panel open, screen unlocked).
+> "My iPhone can send to my Mac" therefore proves nothing about the reverse direction.
+
+Full write-up with log evidence, error-code meanings and tooling pitfalls:
+**[docs/ANALYSIS.md](docs/ANALYSIS.md)** · **[中文版](docs/ANALYSIS.zh-CN.md)**
+
+---
+
 ## One-line fix (diagnose only — changes nothing)
 
 ```bash

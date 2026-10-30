@@ -6,6 +6,34 @@
 
 ---
 
+## 双向诊断（推荐先跑这个）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/check.sh | bash
+```
+
+它会**分别判断问题在 Mac 侧还是对端**，并给出对应的处理动作。实测输出示例：
+
+```
+[1] Mac 侧：蓝牙        OK   State=On  48:E2:44:E1:F1:7A  v8718 c5747
+    NVRAM              OK   bluetoothExternalDongleFailed=%00
+[2] Mac 侧：服务发布    OK   已发布 _airdrop._tcp (实例名 0c571d750a9a)
+                       OK   曾建立 AWDL 数据通路（链路本身是通的）
+[3] 对端               WARN 发现记录已老化 (Aging out)
+                       FAIL 发送失败 Code=7 / NWError -65553
+[4] 结论               问题在对端（iPhone/iPad），Mac 侧健康
+```
+
+> **重要：AirDrop 两个方向的机制不同。**
+> iPhone → Mac 只需要 Mac 侧发布服务（自动完成）；
+> Mac → iPhone 需要 **iPhone 保持广播状态**（面板打开、屏幕解锁）。
+> 所以「iPhone 能发给我」不能证明「我能发给 iPhone」。
+
+详细技术分析（含日志证据、错误码含义、工具陷阱）见
+**[docs/ANALYSIS.md](docs/ANALYSIS.md)** · **[中文版](docs/ANALYSIS.zh-CN.md)**
+
+---
+
 ## 一行修复（先检查，不改动任何东西）
 
 ```bash
