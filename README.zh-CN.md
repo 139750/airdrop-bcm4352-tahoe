@@ -6,6 +6,24 @@
 
 ---
 
+## 一行修复（先检查，不改动任何东西）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/fix.sh | bash
+```
+
+脚本会逐项检查：macOS 版本 → 网卡识别 → 蓝牙状态 → NVRAM 标志 → AirDrop 服务注册，然后告诉你哪里有问题。
+
+**确认要修复，再加 `--fix`：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/fix.sh | bash -s -- --fix
+```
+
+**注意**：`--fix` 会改 NVRAM 并重启 `bluetoothd`。它**不会**动你的 EFI——永久化那一步需要你自己改 `config.plist`（脚本结尾会打印具体位置）。
+
+---
+
 ## 一句话结论：真正起作用的只有两件事
 
 | 哪一侧 | 做什么 |

@@ -10,6 +10,24 @@ is the useful part, because most guides send you down those paths.
 
 ---
 
+## One-line fix (diagnose only — changes nothing)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/fix.sh | bash
+```
+
+It checks macOS version → card identification → Bluetooth state → NVRAM flag → AirDrop service registration, then reports what's wrong.
+
+**To actually repair, add `--fix`:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/139750/airdrop-bcm4352-tahoe/main/fix.sh | bash -s -- --fix
+```
+
+**Note:** `--fix` writes NVRAM and restarts `bluetoothd`. It does **not** touch your EFI — making the fix permanent requires editing `config.plist` yourself (the script prints the exact location at the end).
+
+---
+
 ## TL;DR — what actually fixed it
 
 Two things. That's all.
