@@ -1,5 +1,7 @@
 # AirDrop on Hackintosh — Broadcom BCM4352 (`14e4:43b1`) + macOS 26 Tahoe
 
+**English** | [简体中文](README.zh-CN.md)
+
 **Status: WORKING — bidirectional AirDrop verified (Mac → iPhone and iPhone → Mac)**
 
 This is a post-mortem after several hours of debugging. The conclusion is short;
