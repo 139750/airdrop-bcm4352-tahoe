@@ -1,301 +1,174 @@
-# AirDrop Fix — Broadcom BCM4352 (`14e4:43b1`) on macOS 26 Tahoe
+# AirDrop on Hackintosh — Broadcom BCM4352 (`14e4:43b1`) + macOS 26 Tahoe
 
 **Status: WORKING — bidirectional AirDrop verified (Mac → iPhone and iPhone → Mac)**
 
-This documents a fully working fix for AirDrop on Hackintosh systems using the
-**BCM94352Z / BCM4352 (`14e4:43b1`)** Wi-Fi+BT combo card under macOS 26 (Tahoe),
-where Wi-Fi works via OCLP patches but AirDrop silently fails.
-
-The common community verdict for this card is *"buy a BCM943602CDP"*. **That is not
-required.** The failure here was not a hardware limitation — it was five independent
-software faults stacked on top of each other, one of which (the NVRAM variable) was
-invisible because macOS 26 removed the log mode that would have shown it.
+This is a post-mortem after several hours of debugging. The conclusion is short;
+the list of things that *looked* like the cause but were not is long. That list
+is the useful part, because most guides send you down those paths.
 
 ---
 
-## Tested environment
+## TL;DR — what actually fixed it
 
-| Component | Value |
+Two things. That's all.
+
+| Side | Action |
 |---|---|
-| macOS | 26.7.2 (25G332) |
-| SMBIOS | `iMac20,1` |
-| CPU | Intel i9-9900 ES |
-| Wi-Fi/BT card | BCM94352Z — `14e4:43b1` (BCM4352), Bluetooth `0x0489:0xE07A` (Foxconn-packaged BCM20702) |
-| Wireless stack | OCLP-Mod 3.1.9 root patch → `IO80211FamilyLegacy 1200.12.2b1` + `AirPort.BrcmNIC 1400.1.1` |
-| SIP | `csr-active-config = 0x803` |
-| Boot args | `keepsyms=1 igfxonln=1 alcid=3 -amfipassbeta -lilubetaall -brcmfxbeta brcmfx-country=#a` |
+| **Mac** | Fix `bluetoothExternalDongleFailed` being wiped from NVRAM by OpenCore |
+| **Peer (iPhone)** | Power-cycle its Wi-Fi once (forces iOS to re-register continuity services) |
+
+Do those two, and AirDrop works in both directions on a card the community says
+you must replace.
 
 ---
 
-## Symptom
+## The one real technical fault: Bluetooth was never running
 
-- Wi-Fi connects and works normally
-- Bluetooth appears in System Information but `State: Off`, `Address: NULL`,
-  `Chipset: BCM_4350C2`, `Firmware Version: v0 c0`
-- AirDrop: iPhone never appears in the Mac's list (or appears but sends fail with
-  `SFAirDropSend.Failure Code=7`), and the Mac never appears on the iPhone
-- `sharingd` logs `AirDrop not ready: wifi=… bluetooth=… carplay=… receivingEnabled=… isVirtualMachine=… isMulticastAdvertisementsDisabled=…`
-  with **every value redacted as `<private>`**
-
-```bash
-log show --last 5m --predicate 'process == "sharingd"' | grep "not ready"
-```
-
-### Why the values are hidden
-
-`log config --mode "private_data:on"` **no longer exists in macOS 26**:
+Symptom in System Information:
 
 ```
-log: Invalid Modes 'private_data:on'
+State: Off        Address: NULL
+Chipset: BCM_4350C2    Firmware Version: v0 c0
 ```
 
-The valid modes are only `level`, `persist`, `stream`, `signpost-*`. Do not waste
-time trying to unlock the redacted fields — you cannot.
-
-You must reason about the six conditions from the outside. That is what the
-diagnostic section below does.
-
----
-
-## The five faults
-
-Every one of these had to be fixed. Fixing any subset leaves AirDrop broken, and
-because fault #1 kills Bluetooth outright, *nothing else you tweak will appear to
-work* until it is fixed.
-
-### Fault 1 — `bluetoothExternalDongleFailed` is wiped by OpenCore every boot
-
-**This is the decisive one.**
-
-Many OpenCore configs list `bluetoothExternalDongleFailed` under
-`NVRAM > Delete > 7C436110-AB2A-4BBB-A880-FE41995C9F82`. Every boot OpenCore deletes
-it; macOS then writes `1` ("external dongle failed") and **shuts the Bluetooth
-controller down**.
-
-Check the live value:
+Check the live NVRAM value:
 
 ```bash
 nvram bluetoothExternalDongleFailed
-# %01  = broken  (Bluetooth will be State: Off)
-# %00  = healthy
+# %01 = broken (Bluetooth will stay Off)
+# %00 = healthy
 ```
 
-Confirm the shutdown in System Information:
+**Root cause:** many OpenCore configs list `bluetoothExternalDongleFailed` under
+`NVRAM > Delete > 7C436110-AB2A-4BBB-A880-FE41995C9F82`. Every boot OpenCore
+deletes it, macOS writes `1` ("external dongle failed"), and the controller is
+shut down. It never gets a chance to upload firmware.
 
-```bash
-system_profiler SPBluetoothDataType | grep -E "State|Address|Firmware"
-# State: Off / Address: NULL / Firmware Version: v0 c0   ← controller never came up
-```
-
-**Fix**
+**Fix:**
 
 1. Remove `bluetoothExternalDongleFailed` from `NVRAM > Delete`.
-2. Keep it in `NVRAM > Add` with the value `b'\x00'`.
-3. Apply immediately without rebooting:
+2. Keep it in `NVRAM > Add` as `b'\x00'`.
+3. Apply live without rebooting:
 
 ```bash
 sudo nvram bluetoothExternalDongleFailed=%00
 sudo nvram bluetoothInternalControllerInfo=%00%00%00%00%00%00%00%00%00%00%00%00%00%00
 sudo pkill -9 bluetoothd
 sleep 6
-```
-
-Verify:
-
-```bash
 system_profiler SPBluetoothDataType | grep -E "State|Address|Firmware"
-# State: On / Address: 48:E2:44:E1:F1:7A / Firmware Version: v8718 c5747
+# State: On / Address: <real MAC> / Firmware Version: v8718 c5747
 ```
 
-> **Red herring warning.** `ioreg -r -c BrcmPatchRAM3` shows
-> `!registered, !matched` even when everything is fine — that node is the
-> personality *matcher*, not a driver instance. Likewise, `0x0489:0xE07A` **is**
-> present in BrcmPatchRAM3's 100 built-in personalities (`0489_e07a`, firmware
-> `BCM20702A1_001.002.014.1483.1651_v5747`). No custom kext, no edited VID/PID
-> table is needed. If you are tempted to "make a kext" here, you are solving the
-> wrong problem.
+**Red herrings around this:** `ioreg -r -c BrcmPatchRAM3` showing
+`!registered, !matched` is normal — that node is the personality matcher, not a
+driver instance. And `0x0489:0xE07A` (Foxconn-packaged BCM20702) **is** already in
+BrcmPatchRAM3's built-in personality table (`0489_e07a`, firmware
+`BCM20702A1_001.002.014.1483.1651_v5747`). No custom kext, no edited VID/PID
+table. If you're building a kext here, you're solving the wrong problem.
 
-### Fault 2 — `NoMulticastAdvertisements` blocks mDNS advertising
+---
 
-`isMulticastAdvertisementsDisabled` in the `not ready` line maps to this plist key.
+## The second fix: the peer's sharing stack was stale
 
-```bash
-defaults read /Library/Preferences/com.apple.mDNSResponder.plist NoMulticastAdvertisements
-```
-
-**Fix**
-
-```bash
-sudo defaults write /Library/Preferences/com.apple.mDNSResponder.plist NoMulticastAdvertisements -bool false
-sudo killall -HUP mDNSResponder
-sleep 3
-sudo killall -9 sharingd
-```
-
-Effect: `Advertising Enabled: NO` → `YES`.
-
-### Fault 3 — `DiscoverableMode` silently reverts to `Contacts Only`
-
-```bash
-defaults read com.apple.sharingd DiscoverableMode
-# "Contacts Only"  ← wrong, must be Everyone
-```
-
-This reverts silently whenever the IdentityServices / Sharing state is reset.
-
-**Fix**
-
-```bash
-defaults write com.apple.sharingd DiscoverableMode -string "Everyone"
-```
-
-### Fault 4 — Wi-Fi channel must equal the AirDrop channel
-
-AWDL timeshares the radio with the associated Wi-Fi channel. If Wi-Fi sits on
-channel 1 (2.4 GHz) or 64 while AWDL wants 149, the time-multiplexing cost is too
-high and macOS **drops the AWDL time allocation entirely**. The visible result is:
+After the Mac side checked out (Bluetooth live, `_airdrop._tcp` resolving), the
+send direction still failed:
 
 ```
-DNS Error: Refused          (kDNSServiceErr_Refused, -65553)
-airdrop.send.resolve-failure
+wifip2pd: Cannot resolve iMac because peer not discovered with _airdrop._tcp.local
+sharingd: Ask failed Error Domain=Sharing.SFAirDropSend.Failure Code=7
 ```
 
-on an `app_svc: com.apple.sharingd.AirDrop` connection bound to `en0`/`en1`.
+Toggling the iPhone's **Wi-Fi off and back on** cleared it immediately. iOS
+re-registered its Continuity services and rebuilt the AWDL peer state.
 
-```bash
-system_profiler SPAirPortDataType | grep "AirDrop Channel"   # e.g. 149
-```
+---
 
-Verify the **actual** associated channel with CoreWLAN — `system_profiler`
-frequently reports a stale channel:
+## Things that were NOT the cause (all tested and disproven)
 
-```python
-import objc
-objc.loadBundle("CoreWLAN", globals(), bundle_path="/System/Library/Frameworks/CoreWLAN.framework")
-i = CWInterface.interface()
-print(i.wlanChannel().channelNumber())
-```
+Every item below was believed at some point during this debugging session and
+later disproven. Do not spend time on them.
 
-**Fix**: put the Wi-Fi SSID on the same channel the system picked for AWDL
-(149 here). Note that some Xiaomi/regional firmware only exposes channels
-36–64 and silently refuses 149 — check `available_channels` before assuming
-the change took effect.
+| Claim | Reality |
+|---|---|
+| Both devices must be on the same Wi-Fi | **False.** AWDL is peer-to-peer and crosses networks. User-confirmed: it works on different Wi-Fi networks. |
+| Wi-Fi channel must match the AirDrop channel (149) | **False.** Works after switching to a different network/channel entirely. |
+| Ethernet must be disabled so Wi-Fi becomes primary | **False.** Works with Ethernet connected the whole time. |
+| `NoMulticastAdvertisements` must be false | Not load-bearing. |
+| `DiscoverableMode` must be `Everyone` | Not load-bearing. `Contacts Only` works too. |
+| `sharingd` doesn't register `_airdrop._tcp`, register it yourself | **False and harmful.** `sharingd` registers it on a **dynamic port** (observed `16930`). A hand-rolled registrar pointing at `8770` advertises a dead port — 8770 is a separate listener. |
+| `14e4:43b1` can't do AirDrop, buy a `14e4:43ba` card | **False.** No hardware replacement needed. |
 
-### Fault 5 — `sharingd` binds port 8770 but never registers `_airdrop._tcp`
+---
 
-This is the last gap, and it is a macOS-side omission (at least on this
-configuration). The receiver is alive:
+## Diagnostic tooling pitfalls (this burned the most time)
 
-```bash
-sudo lsof -nP -p $(pgrep -x sharingd) | grep LISTEN
-# sharingd  22u  IPv6  ...  TCP *:8770 (LISTEN)
-```
+If you write your own DNS-SD probe, get these right or every result is void:
 
-...but nothing is advertised:
-
-```bash
-dns-sd -B _airdrop._tcp local.     # 0 items — but this is a FALSE NEGATIVE
-```
-
-**`dns-sd` cannot pass `kDNSServiceFlagsIncludeAWDL`**, so it will never see AWDL
-services. You must call the C API with the flag:
+### 1. `kDNSServiceFlagsIncludeAWDL` is `0x100000`, not `0x1000`
 
 ```c
-DNSServiceBrowse(&ref,
-                 kDNSServiceFlagsIncludeAWDL | kDNSServiceFlagsIncludeP2P,
-                 kDNSServiceInterfaceIndexAny,
-                 "_airdrop._tcp", "local.", callback, NULL);
+kDNSServiceFlagsIncludeAWDL        = 0x100000   // correct
+kDNSServiceFlagsReturnIntermediates = 0x1000    // what you get if you guess
+kDNSServiceFlagsIncludeP2P         = 0x20000
 ```
 
-`scripts/awdl_browse.py` is a ctypes implementation of exactly this. Run it and
-you will see the iPhone's real records:
+Verify against Apple's header rather than memory:
 
-```
-[FOUND] name='Gavin'  type='_rdlink._tcp.'  ifIndex=14     ← the iPhone
-[FOUND] name='iMac'   type='_companion-link._tcp.'  ifIndex=1
-```
-
-`_airdrop._tcp` stays at **0 items** — confirming the Mac is not advertising.
-
-**Fix**: register the service yourself, pointed at `sharingd`'s native 8770.
-The transfer is still handled by macOS's own receiver; this only supplies the
-announcement `sharingd` forgets to publish.
-
-```python
-from zeroconf import IPVersion, ServiceInfo, Zeroconf
-import socket
-
-zc = Zeroconf(interfaces=[awdl_ipv6], ip_version=IPVersion.V6Only, apple_p2p=True)
-info = ServiceInfo(
-    "_airdrop._tcp.local.",
-    "iMac._airdrop._tcp.local.",
-    addresses=[socket.inet_pton(socket.AF_INET6, awdl_ipv6)],
-    port=8770,
-    properties={b"flags": b"1"},
-    server="iMac.local.",
-)
-zc.register_service(info)
+```bash
+curl -sL https://raw.githubusercontent.com/apple-oss-distributions/mDNSResponder/main/mDNSShared/dns_sd.h \
+  | grep -nE 'IncludeAWDL|IncludeP2P'
 ```
 
-`apple_p2p=True` is required — it is the python-zeroconf flag that enables AWDL
-on Darwin. `scripts/airdrop_register.py` is the ready-to-run version, including a
-LaunchAgent plist for boot persistence.
+### 2. Browse must bind the awdl0 interface index
 
-> **Expected behaviour**: port 8770 is bound **on demand**. When the AirDrop
-> window is closed, `sharingd` releases it and the register script logs
-> `8770 已无监听`. This is normal. Open the AirDrop window and it comes back.
+An AWDL-only record is **invisible** to a browse on `kDNSServiceInterfaceIndexAny`
+(0). The same record returns 1 item on ifIndex 7 and 0 items on Any.
+
+### 3. `DNSServiceResolve` takes name / regtype / domain separately
+
+```c
+DNSServiceResolve(sdRef, flags, ifIndex,
+                  const char *name,      // NOT a single fullname
+                  const char *regtype,
+                  const char *domain,
+                  callback, context);
+```
+
+Passing a concatenated `fullname` shifts every later argument and returns
+`-65540` (`kDNSServiceErr_BadParam`). This produced a session full of fake
+"resolve failed" findings that had nothing to do with the system under test.
+
+### 4. `dns-sd` CLI always returns 0 for AWDL services
+
+It cannot pass `kDNSServiceFlagsIncludeAWDL`. `dns-sd -B _airdrop._tcp` returning
+0 items means **nothing**. Use the C API (see `scripts/awdl_browse.py`).
+
+### 5. Verify the peer is reachable before theorising
+
+Stale DHCP leases lie. An iPhone that had roamed to another WLAN left two dead
+ARP entries behind, each producing 100% packet loss and a fresh wrong theory.
+Check `arp -a | grep -i iphone` and ping the live address — but remember that a
+common subnet is not a requirement for AirDrop.
 
 ---
 
-## Diagnostic flow (do it in this order)
+## Verification
 
-1. **Bluetooth first.** `system_profiler SPBluetoothDataType` must show `State: On`
-   and a real firmware version. If it shows `v0 c0`, stop — fix Fault 1 before
-   anything else. No BLE means no AirDrop handshake, ever.
-2. **Channel match.** Compare `AirDrop Channel` with the real associated channel.
-3. **mDNS advertising.** Check `Advertising Enabled: YES`.
-4. **Service registration.** Use `awdl_browse.py` (not `dns-sd`) to confirm that
-   `_airdrop._tcp` exists.
-5. **Only then** look at `sharingd`'s `not ready` line.
+```bash
+# Bluetooth must be genuinely up
+system_profiler SPBluetoothDataType | grep -E "State|Address|Firmware"
+# State: On / Address: 48:e2:44:e1:f1:7a / Firmware Version: v8718 c5747
 
-Skipping to step 5 with a dead controller is the most common way to lose hours.
+# sharingd's own record, on a dynamic port
+python3 scripts/awdl_browse.py _airdrop._tcp
+# iMac  ifIndex 7  port 16930  host iMac.local.  TXT: flags=1
 
----
+# peer's continuity service
+python3 scripts/awdl_browse.py _companion-link._tcp
+# iPhone instance appears on the Wi-Fi interface
+```
 
-## What does NOT fix it
-
-- **`AirportBrcmFixup` parameters** (`brcmfx-driver`, `brcmfx-country`, `brcmfx-aspm`)
-  — they affect the Wi-Fi link only, never AWDL/AppService.
-- **Patching `AppleBCMWLANCoreMac` / `BrcmPatchRAM3` personalities** — every Wi-Fi
-  kext on macOS 26 is **codeless**. The actual binaries live in the signed
-  `BootKernelExtensions.kc`. There is no file to edit; the chip-support check is
-  compiled into a kernel collection you cannot modify without breaking the seal.
-- **OCLP 3.0.0-rc.5 root patch** — fails with `kmutil` **Return Code 71**:
-  `AppleCentauriManager` → `AppleEmbeddedPCIE` → `AppleARMPlatform` (ARM-only,
-  unsatisfiable on Intel).
-- **Patching SIP to enable `task_for_pid`** (`csr-active-config 0x803 → 0x807`) to
-  attach a debugger to `sharingd` — it works (`Debugging Restrictions: disabled`)
-  but is useless, because the interesting log values are redacted at the source
-  and frida still cannot read them meaningfully. Revert it afterwards; the extra
-  bit buys nothing for this problem.
-- **Buying a BCM943602CDP (`14e4:43ba`)** — not required. It is the standard
-  community answer, and it does work, but on `14e4:43b1` the five fixes above are
-  sufficient.
-
----
-
-## Why the "just replace the card" advice is incomplete
-
-The community-visible evidence for `43ba` is real (bidirectional AirDrop verified
-on macOS Tahoe 26.x with OCLP-Mod 3.1.3+). What is missed is *why* `43b1` fails:
-
-- It is **not** in `AirPortBrcmNIC`'s native device list (`43ba`, `43e3`, `43a0` are).
-  `AirportBrcmFixup` only patches it enough for the **Wi-Fi link**.
-- That patch never extended to the AWDL/AppService path, so the failure surfaces
-  as an AirDrop-only problem while Wi-Fi looks perfectly healthy.
-
-Which is exactly why a working BLE stack plus an explicit `_airdrop._tcp`
-registration closes the gap — the receiver was always functional.
+Then transfer in both directions.
 
 ---
 
@@ -303,32 +176,26 @@ registration closes the gap — the receiver was always functional.
 
 | File | Purpose |
 |---|---|
-| `scripts/airdrop_register.py` | Registers `_airdrop._tcp` on awdl0 → `sharingd:8770` |
-| `scripts/awdl_browse.py` | DNS-SD browse with `kDNSServiceFlagsIncludeAWDL` (the flag `dns-sd` can't pass) |
-| `launchd/com.gavin.airdrop-register.plist` | LaunchAgent for boot persistence |
-| `diagnose.sh` | One-shot health check for all five faults |
+| `scripts/awdl_browse.py` | DNS-SD browse with the **correct** `IncludeAWDL` flag, bound to awdl0 |
+| `scripts/resolve_svc.py` | Resolve + TXT dump with the **correct** `DNSServiceResolve` signature |
+| `scripts/airdrop_register.py` | Historical — **do not use.** Registers `_airdrop._tcp` on port 8770, which is wrong. Kept only so the mistake is documented. |
+| `diagnose.sh` | Health check for the Bluetooth/NVRAM side |
 
 ---
 
-## Verification
+## Why the "just buy a 43ba card" advice is incomplete
 
-```bash
-system_profiler SPBluetoothDataType | grep -E "State|Address|Firmware"
-# State: On / Address: 48:E2:44:E1:F1:7A / Firmware Version: v8718 c5747
+The `43ba` evidence is real, and swapping works. But on `14e4:43b1` the failure
+here was not the card at all: Bluetooth was administratively shut down by a
+one-line NVRAM conflict, and the peer's sharing state was stale. Wi-Fi itself
+worked perfectly the entire time.
 
-sudo lsof -nP -iTCP:8770 -sTCP:LISTEN
-# sharingd ... TCP *:8770 (LISTEN)      (only while the AirDrop window is open)
-
-/usr/bin/python3 scripts/awdl_browse.py | grep -E "_airdrop|_rdlink"
-# ('Gavin', '_rdlink._tcp.', 'local.', 14)    ← iPhone visible
-# ('iMac',  '_airdrop._tcp.', 'local.', 7)    ← Mac registered
-```
-
-Bidirectional transfer confirmed: Mac → iPhone and iPhone → Mac.
+If you're on `43b1` and Wi-Fi works but AirDrop doesn't, check Bluetooth's
+`State` and `Firmware` first — before spending money.
 
 ---
 
 ## License
 
-MIT. Use it, fork it, improve it. If this saves you from buying a card, that is
-the point.
+MIT. Fork it, correct it, improve it. If this saves you from buying a card, or
+from a night of chasing AWDL ghosts, that's the point.

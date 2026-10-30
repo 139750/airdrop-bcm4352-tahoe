@@ -1,151 +1,80 @@
 #!/usr/bin/env python3
-"""Register _airdrop._tcp on awdl0 pointing at sharingd's native 8770 port.
+"""Register _airdrop._tcp on AWDL pointing at sharingd's native 8770 port.
 
-sharingd binds 8770 but never publishes the mDNS service on this hardware,
-so iPhone cannot discover the Mac. We supply only the announcement; the
-transfer itself is still handled by macOS's own receiver.
+sharingd publishes its own record (an opaque hash name) but SRV/TXT resolution
+fails on this hardware, so iOS can never turn it into a usable endpoint. This
+registrar publishes a complete record set (SRV + TXT + AAAA) that resolves,
+while still pointing at macOS's own receiver on 8770.
 
-Implementation note: python-zeroconf's apple_p2p path was tried first and
-proved unreliable for long-lived AWDL registrations on macOS 26 (it reports
-success but the record stops being visible to browsers after a while).
-This uses the raw DNSService C API with an explicit DNSServiceProcessResult
-loop instead, which is what Apple's own stack does.
+This is the python-zeroconf variant — the configuration that was verified
+working end-to-end (Mac -> iPhone and iPhone -> Mac). An earlier C API rewrite
+returned DNSServiceRegister -65549 (BadParam) and is not used.
 """
-import ctypes
-import select
-import signal
+import socket
 import subprocess
 import sys
 import time
-from ctypes import CFUNCTYPE, byref, c_char_p, c_int32, c_uint16, c_uint32, c_void_p
 
-lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-
-kDNSServiceFlagsIncludeAWDL = 0x1000
-kDNSServiceFlagsIncludeP2P = 0x20000
-kDNSServiceErr_NoError = 0
-
-SERVICE_NAME = "iMac"
-SERVICE_TYPE = "_airdrop._tcp"
-SERVICE_PORT = 8770
+from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 
-def awdl_index():
+def awdl_ipv6():
     out = subprocess.run(["ifconfig", "awdl0"], capture_output=True, text=True).stdout
-    return 7 if "inet6" in out else None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("inet6") and "fe80" in line:
+            return line.split()[1].split("%")[0]
+    return None
 
 
-def sharingd_listening():
+def listener_alive():
     out = subprocess.run(
         ["lsof", "-nP", "-iTCP:8770", "-sTCP:LISTEN"], capture_output=True, text=True
     ).stdout
     return "sharingd" in out
 
 
-state = {"registered": False, "error": None, "ref": None}
+ip = awdl_ipv6()
+if not ip:
+    print("ERROR: awdl0 has no IPv6 address", flush=True)
+    sys.exit(1)
 
+print(f"awdl0 IPv6: {ip}", flush=True)
+if not listener_alive():
+    print("warn: 8770 not bound yet (AirDrop window closed)", flush=True)
 
-def _reg_cb(sdRef, flags, errorCode, name, regtype, domain, context):
-    if errorCode == kDNSServiceErr_NoError:
-        state["registered"] = True
-        nm = name.decode(errors="replace") if name else ""
-        rt = regtype.decode(errors="replace") if regtype else ""
-        dm = domain.decode(errors="replace") if domain else ""
-        print(f"[REGISTER OK] {nm} {rt} {dm}", flush=True)
-    else:
-        state["error"] = errorCode
-        print(f"[REGISTER FAIL] errorCode={errorCode}", flush=True)
+name = "iMac"
+zc = Zeroconf(interfaces=[ip], ip_version=IPVersion.V6Only, apple_p2p=True)
 
-
-CALLBACK = CFUNCTYPE(
-    None, c_void_p, c_uint32, c_int32, c_char_p, c_char_p, c_char_p, c_void_p
+info = ServiceInfo(
+    "_airdrop._tcp.local.",
+    f"{name}._airdrop._tcp.local.",
+    addresses=[socket.inet_pton(socket.AF_INET6, ip)],
+    port=8770,
+    properties={b"flags": b"1"},
+    server="iMac.local.",
 )
-cb = CALLBACK(_reg_cb)
 
+print(f"registering {name}._airdrop._tcp.local. -> [{ip}]:8770 (flags=1)", flush=True)
+zc.register_service(info)
+print("REGISTERED", flush=True)
 
-def register():
-    ifidx = awdl_index()
-    if ifidx is None:
-        print("ERROR: awdl0 not available", flush=True)
-        return False
-
-    sdRef = c_void_p()
-    ret = lib.DNSServiceRegister(
-        byref(sdRef),
-        c_uint32(kDNSServiceFlagsIncludeAWDL | kDNSServiceFlagsIncludeP2P),
-        c_uint32(ifidx),
-        SERVICE_NAME.encode(),
-        SERVICE_TYPE.encode(),
-        b"local.",
-        b"iMac.local.",
-        c_uint16(SERVICE_PORT),
-        c_uint16(0),
-        None,
-        cb,
-        None,
-    )
-    if ret != kDNSServiceErr_NoError:
-        print(f"DNSServiceRegister failed ret={ret}", flush=True)
-        return False
-
-    state["ref"] = sdRef
-    fd = lib.DNSServiceRefSockFD(sdRef)
-    if fd < 0:
-        print("DNSServiceRefSockFD failed", flush=True)
-        return False
-
-    deadline = time.time() + 5
-    while time.time() < deadline and not state["registered"] and state["error"] is None:
-        r, _, _ = select.select([fd], [], [], 0.5)
-        if fd in r:
-            lib.DNSServiceProcessResult(sdRef)
-
-    if state["registered"]:
-        print(
-            f"Registered {SERVICE_NAME}.{SERVICE_TYPE} on awdl0 (ifIndex {ifidx}) "
-            f"-> port {SERVICE_PORT}",
-            flush=True,
-        )
-        return True
-    print("Registration did not confirm; retrying", flush=True)
-    return False
-
-
-def main():
-    warned = False
+warned = False
+try:
     while True:
-        if state["ref"] is None:
-            if not register():
-                time.sleep(10)
-                continue
-            warned = False
-
-        sdRef = state["ref"]
-        fd = lib.DNSServiceRefSockFD(sdRef)
-        if fd >= 0:
-            r, _, _ = select.select([fd], [], [], 1.0)
-            if fd in r:
-                lib.DNSServiceProcessResult(sdRef)
-
-        alive = sharingd_listening()
+        time.sleep(10)
+        alive = listener_alive()
         if not alive and not warned:
-            print("note: 8770 not bound (AirDrop window closed) — registration kept",
-                  flush=True)
+            print("note: 8770 not bound (AirDrop window closed)", flush=True)
             warned = True
         elif alive and warned:
             print("note: 8770 bound again (AirDrop window open)", flush=True)
             warned = False
-
-
-if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+except KeyboardInterrupt:
+    print("unregistering...", flush=True)
+finally:
     try:
-        main()
-    except KeyboardInterrupt:
+        zc.unregister_service(info)
+        zc.close()
+    except Exception:
         pass
-    finally:
-        if state.get("ref"):
-            try:
-                lib.DNSServiceRefDeallocate(state["ref"])
-            except Exception:
-                pass

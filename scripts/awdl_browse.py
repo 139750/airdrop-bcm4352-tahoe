@@ -20,7 +20,7 @@ from ctypes import CFUNCTYPE, byref, c_char_p, c_int32, c_uint32, c_void_p
 
 lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
 
-kDNSServiceFlagsIncludeAWDL = 0x1000
+kDNSServiceFlagsIncludeAWDL = 0x100000
 kDNSServiceFlagsIncludeP2P = 0x20000
 kDNSServiceInterfaceIndexAny = 0
 AWDL_IFINDEX = 7
