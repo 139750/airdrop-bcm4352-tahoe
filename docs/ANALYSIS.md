@@ -81,7 +81,57 @@ sharingd: Waiting for transfer connection Error Domain=Network.NWError Code=-655
 
 ---
 
-## 4. 结论：iPhone 必须处于「可被发现」状态
+## 3.5 The two failure stages of a send (measured)
+
+A Mac → iPhone transfer fails at one of two distinct stages, and the symptom differs.
+
+### Stage A — cannot connect (App Service timeout)
+
+```
+09:45:24  Sending ASK request
+09:45:24  Creating new AirDrop connection → Connecting to endpoint → Starting connection
+09:45:39  Waiting for transfer connection Error Domain=Network...     ← 15 s timeout
+09:45:39  Resolve failed → Returning cached AirDropID
+09:45:39  Transfer connection invalidated
+          [C4.1 app_svc: com.apple.sharingd.AirDrop, service_id: 7D8DD6A1...]
+          SFServiceCore Invalidated
+```
+
+The endpoint being connected to is `app_svc` — the peer's `_applicationservicepairing._tcp`.
+
+- Service present → connection establishes → the iPhone shows a prompt
+- Service absent → 15 s timeout, **no prompt on the iPhone at all**, Mac UI just hangs
+
+Measured at the same moment:
+
+```
+_applicationservicepairing._tcp   1 item    ← only iMac (the Mac itself)
+_appsvcprepair._tcp               1 item    ← only iMac
+_asquic._udp                      5 items   ← the iPhone's QUIC channel IS present
+```
+
+The iPhone opened its QUIC data channel but did **not** advertise the "discoverable"
+service, so Stage A can only time out.
+
+### Stage B — connected but rejected
+
+```
+Ask failed Error Domain=Sharing.SFAirDropSend.Failure Code=7
+```
+
+The connection was established and the request delivered, but the peer declined or
+timed out waiting for a human to accept (locked screen, "Contacts Only", etc).
+
+### How to tell them apart
+
+| Symptom | Stage | Meaning |
+|---|---|---|
+| Send spins forever, iPhone shows nothing | A | Peer is not advertising `_applicationservicepairing` |
+| iPhone prompts, then declines/times out | B | Stage A worked; the problem is authorisation |
+
+---
+
+## 4. Conclusion: the iPhone must be in a discoverable state
 
 iOS 的 AirDrop 广播是 **按需 + 超时** 的，这是 Apple 的隐私设计：
 

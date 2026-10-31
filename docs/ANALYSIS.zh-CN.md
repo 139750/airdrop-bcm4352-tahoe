@@ -82,6 +82,54 @@ sharingd: Waiting for transfer connection Error Domain=Network.NWError Code=-655
 
 ---
 
+## 3.5 发送失败的两个阶段（实测）
+
+Mac → iPhone 的失败发生在两个不同阶段，症状完全不同。
+
+### 阶段 A：连不上（App Service 超时）
+
+```
+09:45:24  Sending ASK request
+09:45:24  Creating new AirDrop connection → Connecting to endpoint → Starting connection
+09:45:39  Waiting for transfer connection Error Domain=Network...     ← 15 秒超时
+09:45:39  Resolve failed → Returning cached AirDropID
+09:45:39  Transfer connection invalidated
+          [C4.1 app_svc: com.apple.sharingd.AirDrop, service_id: 7D8DD6A1...]
+          SFServiceCore Invalidated
+```
+
+连接目标是 `app_svc`，也就是对端的 `_applicationservicepairing._tcp`。
+
+- 该服务在 → 连接建立 → iPhone 弹窗
+- 该服务不在 → 15 秒超时，**iPhone 完全无提示**，Mac 侧表现为「发送卡住」
+
+同一时刻的实测：
+
+```
+_applicationservicepairing._tcp   1 项   ← 只有 iMac（Mac 自己）
+_appsvcprepair._tcp               1 项   ← 只有 iMac
+_asquic._udp                      5 项   ← iPhone 的 QUIC 通道在
+```
+
+**iPhone 开了 QUIC 数据通道，但没有广播「可被发现」服务**，所以阶段 A 必然超时。
+
+### 阶段 B：连上了但被拒
+
+```
+Ask failed Error Domain=Sharing.SFAirDropSend.Failure Code=7
+```
+
+连接建立了、请求送达了，但对端拒绝或等人点接受超时（锁屏、仅联系人等）。
+
+### 如何区分
+
+| 症状 | 阶段 | 含义 |
+|---|---|---|
+| 一直转圈，iPhone 无任何提示 | A | 对端没广播 `_applicationservicepairing` |
+| iPhone 弹窗后拒绝/超时 | B | 阶段 A 通过，问题在授权 |
+
+---
+
 ## 4. 结论：iPhone 必须处于「可被发现」状态
 
 iOS 的 AirDrop 广播是 **按需 + 超时** 的，这是 Apple 的隐私设计：
